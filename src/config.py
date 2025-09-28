@@ -1,0 +1,23 @@
+# src/config.py
+import argparse
+def get_args():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--seed", type=int, default=123)
+    ap.add_argument("--n_start", type=int, default=8)
+    ap.add_argument("--n_target", type=int, default=32)
+    ap.add_argument("--rounds_per_n", type=int, default=10)
+    ap.add_argument("--seeds_per_round", type=int, default=32)
+    ap.add_argument("--local_time_per_seed", type=float, default=3.0)
+    ap.add_argument("--elites_to_train", type=int, default=96)
+    ap.add_argument("--batch_size", type=int, default=32)
+    ap.add_argument("--train_steps_per_round", type=int, default=60)
+    ap.add_argument("--temperature", type=float, default=1.0)
+    ap.add_argument("--top_p", type=float, default=0.9)
+    ap.add_argument("--alpha_lp", type=float, default=0.15)
+    ap.add_argument("--beta_ilp", type=float, default=0.10)
+    ap.add_argument("--grb_threads", type=int, default=0)
+    ap.add_argument("--lift_step", type=int, default=3)
+    ap.add_argument("--out_root", type=str, default="runs")
+    ap.add_argument("--backend", type=str, default="nanogpt", choices=["nanogpt","makemore"])
+    ap.add_argument("--use_az", action="store_true", help="use AlphaZero proposer hook")
+    return ap.parse_args()
