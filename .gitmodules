@@ -1,0 +1,12 @@
+[submodule "external/nanogpt"]
+	path = external/nanogpt
+	url = https://github.com/karpathy/nanoGPT
+[submodule "external/makemore"]
+	path = external/makemore
+	url = https://github.com/karpathy/makemore
+[submodule "external/patternboost"]
+	path = external/patternboost
+	url = https://github.com/zawagner22/transformers_math_experiments
+[submodule "external/alpha-zero-general"]
+	path = external/alpha-zero-general
+	url = https://github.com/suragnair/alpha-zero-general
