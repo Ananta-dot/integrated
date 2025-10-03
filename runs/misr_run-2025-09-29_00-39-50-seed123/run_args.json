@@ -1,0 +1,22 @@
+{
+  "seed": 123,
+  "out_root": "runs",
+  "n_start": 5,
+  "n_target": 32,
+  "lift_step": 3,
+  "rounds_per_n": 10,
+  "seeds_per_round": 8,
+  "local_time_per_seed": 4.0,
+  "elites_to_train": 96,
+  "batch_size": 32,
+  "train_steps_per_round": 20,
+  "temperature": 1.0,
+  "top_p": 0.9,
+  "alpha_lp": 0.15,
+  "beta_ilp": 0.1,
+  "grb_threads": 6,
+  "backend": "makemore",
+  "use_az": false,
+  "seed_pkl": "",
+  "seed_top_k": 4
+}

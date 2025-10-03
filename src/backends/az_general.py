@@ -1,193 +1,167 @@
 # src/backends/az_general.py
 from __future__ import annotations
-import sys, pathlib, math, random, importlib.util
+import os, sys
 from typing import List, Tuple
 import numpy as np
-
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-azg_dir = (ROOT / "external" / "alpha-zero-general")
-
-# Robust import of MCTS
-try:
-    sys.path.append(str(azg_dir.resolve()))
-    from MCTS import MCTS  # type: ignore
-except Exception:
-    mcts_py = azg_dir / "MCTS.py"
-    spec = importlib.util.spec_from_file_location("azg_MCTS", mcts_py)
-    azg_MCTS = importlib.util.module_from_spec(spec)  # type: ignore
-    assert spec and spec.loader
-    spec.loader.exec_module(azg_MCTS)  # type: ignore
-    MCTS = azg_MCTS.MCTS  # type: ignore
-
-from ..data import SPECIAL, BASE_VOCAB, MAX_N, tokens_to_seq
-from ..misr_core import score_ratio
+import random
 
 Seq = List[int]
 Instance = Tuple[Seq, Seq]
 
-class MISRTokenGame:
-    def __init__(self, n: int, vocab_size: int):
-        self.n = n
-        self.vocab_size = vocab_size
-        self.sep_id = SPECIAL["SEP"]
-        self.bos_id = SPECIAL["BOS"]
-        self.eos_id = SPECIAL["EOS"]
-        self.first_label = BASE_VOCAB
-        self.last_label = BASE_VOCAB + n - 1
-        self.target_len = 1 + 2*n + 1 + 2*n  # BOS + 2n + SEP + 2n
+# Optional import of AlphaZero-General
+AZ_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../external/alpha-zero-general"))
+if AZ_ROOT not in sys.path:
+    sys.path.insert(0, AZ_ROOT)
 
+try:
+    from MCTS import MCTS  # alpha-zero-general
+    AZ_AVAILABLE = True
+except Exception:
+    AZ_AVAILABLE = False
+
+
+class MISRBuildGame:
+    """
+    Stateless AlphaZero 'Game' for building (H,V) label sequences for MISR.
+    Board representation (numpy int16, variable length):
+        board = np.array( H + [-1] + V, dtype=np.int16 )
+    where H and V are sequences of labels in 1..n, each repeated at most twice,
+    and -1 is a separator. The process ends when |H| == 2n and |V| == 2n.
+    """
+
+    def __init__(self, n: int):
+        self.n = n
+        self.max_per = 2
+
+    # ---- Required API ----
     def getInitBoard(self):
-        return [self.bos_id]
+        # Start with just the separator
+        return np.array([-1], dtype=np.int16)
 
     def getBoardSize(self):
-        return (self.target_len,)
+        # Not strictly used by core MCTS for variable-length boards; return a dummy
+        return (1,)
 
     def getActionSize(self):
-        return self.vocab_size
+        # Actions are labels 1..n (we map action index 0..n-1 -> label=idx+1)
+        return self.n
 
-    # AlphaZero-General expects this
-    def getCanonicalForm(self, board, player):
-        # single-agent; no change needed
-        return board
-
-    def _counts_half(self, seq_ids):
-        if self.sep_id in seq_ids:
-            start = seq_ids.index(self.sep_id) + 1
+    def getNextState(self, board, player, action_idx):
+        """
+        action_idx in [0..n-1] -> label = action_idx+1
+        If H not full (len(H) < 2n), append to H; else append to V.
+        Return (new_board, same_player)
+        """
+        label = int(action_idx + 1)
+        H, V = self._split(board)
+        if len(H) < 2 * self.n:
+            H = H + [label]
         else:
-            start = 1  # after BOS
-        counts = [0] * (self.n + 1)
-        for t in seq_ids[start:]:
-            if t >= BASE_VOCAB:
-                lab = t - BASE_VOCAB + 1
-                if 1 <= lab <= self.n:
-                    counts[lab] += 1
-        return counts
-
-    def _len_half(self, seq_ids):
-        if self.sep_id in seq_ids:
-            start = seq_ids.index(self.sep_id) + 1
-        else:
-            start = 1
-        length = 0
-        for t in seq_ids[start:]:
-            if t >= BASE_VOCAB:
-                length += 1
-        return length
+            V = V + [label]
+        new_board = np.array(H + [-1] + V, dtype=np.int16)
+        return new_board, player
 
     def getValidMoves(self, board, player):
-        L = len(board)
-        valid = np.zeros(self.getActionSize(), dtype=np.uint8)
-
-        if L >= self.target_len:
-            return valid  # no moves
-
-        has_sep = (self.sep_id in board)
-        if not has_sep:
-            counts = self._counts_half(board)
-            total_labels = self._len_half(board)
-            if total_labels < 2*self.n:
-                for lab in range(1, self.n+1):
-                    if counts[lab] < 2:
-                        valid[BASE_VOCAB + (lab-1)] = 1
-            if total_labels == 2*self.n:
-                valid[self.sep_id] = 1
-        else:
-            counts = self._counts_half(board)
-            total_labels = self._len_half(board)
-            if total_labels < 2*self.n:
-                for lab in range(1, self.n+1):
-                    if counts[lab] < 2:
-                        valid[BASE_VOCAB + (lab-1)] = 1
-            # terminal when target_len reached
-
-        return valid
-
-    def getNextState(self, board, player, action):
-        new_board = list(board)
-        new_board.append(action)
-        return new_board, 1
+        """
+        Return a binary vector of length n: which labels (1..n) can be played now
+        (i.e., count in current half < 2).
+        """
+        H, V = self._split(board)
+        half = H if len(H) < 2 * self.n else V
+        cnt = [0] * (self.n + 1)
+        for x in half:
+            cnt[x] += 1
+        v = np.zeros(self.n, dtype=np.int8)
+        for i in range(1, self.n + 1):
+            if cnt[i] < self.max_per:
+                v[i - 1] = 1
+        return v
 
     def getGameEnded(self, board, player):
-        if len(board) < self.target_len:
-            return 0
-        try:
-            sep_idx = board.index(self.sep_id)
-        except ValueError:
-            return -1  # invalid terminal -> bad outcome
+        """
+        Return 1 when terminal, else 0. (AlphaZero-General uses -1/1 for winners;
+        here it's a construction task, so we just return 1 for 'ended'.)
+        """
+        H, V = self._split(board)
+        done = (len(H) == 2 * self.n and len(V) == 2 * self.n)
+        return 1 if done else 0
 
-        H_tok = board[1:sep_idx]
-        V_tok = board[sep_idx+1:]
-        H = tokens_to_seq(H_tok)
-        V = tokens_to_seq(V_tok)
+    def getCanonicalForm(self, board, player):
+        # No symmetries; return as-is
+        return board
 
-        lp, ilp, ratio, blended = score_ratio(H, V)
-        # squash to [-1,1] to fit AlphaZero value expectations
-        return math.tanh(blended)
+    def stringRepresentation(self, board) -> str:
+        # Used as a dict key inside MCTS; variable-length safe
+        return board.tobytes()
 
-    def stringRepresentation(self, board):
-        return ','.join(map(str, board))
+    # ---- Helpers ----
+    def _split(self, board) -> Tuple[Seq, Seq]:
+        arr = np.asarray(board, dtype=np.int16)
+        # Find separator (-1). If missing (shouldn't happen), treat all as H.
+        sep_idx = np.where(arr == -1)[0]
+        if len(sep_idx) == 0:
+            H = arr.tolist()
+            V = []
+        else:
+            s = int(sep_idx[0])
+            H = arr[:s].tolist()
+            V = arr[s + 1 :].tolist()
+        return H, V
 
-class HeuristicNetWrapper:
-    def __init__(self, game: MISRTokenGame):
-        self.game = game
-        self.action_size = game.getActionSize()
+    def decode(self, board) -> Instance:
+        H, V = self._split(board)
+        return H[:], V[:]
 
-    def predict(self, board):
-        valid = self.game.getValidMoves(board, 1)
-        s = int(valid.sum())
-        if s == 0:
-            v = self.game.getGameEnded(board, 1)
-            return np.zeros(self.action_size, dtype=np.float32), float(v)
-        p = np.where(valid == 1, 1.0 / s, 0.0).astype(np.float32)
+
+class DummyNet:
+    """
+    Minimal policy/value net that returns uniform policy and zero value.
+    AlphaZero-General expects a .predict(canonicalBoard) -> (pi, v).
+    """
+    def __init__(self, n: int):
+        self.n = n
+    def predict(self, canonicalBoard):
+        p = np.ones(self.n, dtype=np.float32) / self.n
         v = 0.0
         return p, v
 
-    def train(self, examples): pass
-    def save_checkpoint(self, folder, filename): pass
-    def load_checkpoint(self, folder, filename): pass
 
-def propose_with_alphazero(n: int, k: int, rng: random.Random,
-                           sims_per_move: int = 128, cpuct: float = 1.5) -> List[Instance]:
-    vocab_size = BASE_VOCAB + MAX_N
-    game = MISRTokenGame(n=n, vocab_size=vocab_size)
-    nnet = HeuristicNetWrapper(game)
-    args = type("Args", (), {
-        "numMCTSSims": sims_per_move,
-        "cpuct": cpuct,
-        "dirichletAlpha": 0.3,
-        "dirichletEps": 0.25,
-        "tempThreshold": 0,
-    })()
-    mcts = MCTS(game, nnet, args=args)
+def propose_with_alphazero(n: int, k: int, rng: random.Random) -> List[Instance]:
+    """
+    Generate k (H,V) proposals using AlphaZero MCTS rollouts.
+    If alpha-zero-general is not present, return [].
+    """
+    if not AZ_AVAILABLE or k <= 0:
+        return []
 
-    proposals: List[Instance] = []
+    game = MISRBuildGame(n)
+    net = DummyNet(n)
+    # Typical small MCTS budget; adjust if needed
+    args = type("Args", (), {"numMCTSSims": 64, "cpuct": 1.5})
+    mcts = MCTS(game, net, args=args)
+
+    out: List[Instance] = []
     for _ in range(k):
         board = game.getInitBoard()
-        while True:
-            pi = mcts.getActionProb(game.getCanonicalForm(board, 1), temp=1)
-            if float(np.sum(pi)) <= 0.0:
-                valid = game.getValidMoves(board, 1)
-                legal = np.flatnonzero(valid).tolist()
-                if not legal: break
-                action = rng.choice(legal)
+        # roll until terminal
+        while game.getGameEnded(board, 1) == 0:
+            valid = game.getValidMoves(board, 1)               # [n] 0/1
+            pi = mcts.getActionProb(game.getCanonicalForm(board, 1), temp=1)  # [n]
+            pi = np.asarray(pi, dtype=np.float32)
+
+            # Mask invalids
+            pi *= valid.astype(np.float32)
+            s = float(pi.sum())
+            if s <= 1e-8:
+                # fallback uniform over valid moves
+                valids_idx = np.where(valid > 0)[0]
+                a_idx = int(rng.choice(valids_idx))
             else:
-                # sample from pi
-                action = int(np.random.choice(len(pi), p=np.array(pi, dtype=np.float64)))
+                pi /= s
+                a_idx = int(np.random.choice(np.arange(game.getActionSize()), p=pi))
+            board, _ = game.getNextState(board, 1, a_idx)
 
-            board, _ = game.getNextState(board, 1, action)
-            if game.getGameEnded(board, 1) != 0:
-                try:
-                    sep_idx = board.index(SPECIAL["SEP"])
-                except ValueError:
-                    break
-                H_tok = board[1:sep_idx]
-                V_tok = board[sep_idx+1:]
-                H = tokens_to_seq(H_tok); V = tokens_to_seq(V_tok)
-                if len(H)==2*n and len(V)==2*n:
-                    proposals.append((H, V))
-                break
+        H, V = game.decode(board)
+        out.append((H, V))
 
-        if len(proposals) >= k:
-            break
-
-    return proposals
+    return out

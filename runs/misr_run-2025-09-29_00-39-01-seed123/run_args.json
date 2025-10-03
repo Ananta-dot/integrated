@@ -1,0 +1,22 @@
+{
+  "seed": 123,
+  "out_root": "runs",
+  "n_start": 8,
+  "n_target": 32,
+  "lift_step": 3,
+  "rounds_per_n": 10,
+  "seeds_per_round": 32,
+  "local_time_per_seed": 3.0,
+  "elites_to_train": 96,
+  "batch_size": 32,
+  "train_steps_per_round": 60,
+  "temperature": 1.0,
+  "top_p": 0.9,
+  "alpha_lp": 0.15,
+  "beta_ilp": 0.1,
+  "grb_threads": 0,
+  "backend": "nanogpt",
+  "use_az": true,
+  "seed_pkl": "",
+  "seed_top_k": 4
+}
